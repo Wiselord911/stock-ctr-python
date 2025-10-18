@@ -8,27 +8,28 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
-# --- Keep-alive web server for Render (FREE plan) ---
+
+# ---------------------- KEEP-ALIVE (Render Free) ----------------------
+# Render (free) ต้องการ web service เปิดพอร์ตไว้ไม่งั้นจะมองว่าแอปตาย
 from flask import Flask
 from threading import Thread
 
-app = Flask(__name__)
+_web = Flask(__name__)
 
-@app.get("/")
+@_web.get("/")
 def root():
     return "STOCK CTR Python bot is running!"
 
-def run_web():
-    import os
-    port = int(os.getenv("PORT", "8080"))  # Render sets $PORT
-    app.run(host="0.0.0.0", port=port)
+def _run_web():
+    port = int(os.getenv("PORT", "8080"))  # Render จะใส่ค่า PORT ให้
+    _web.run(host="0.0.0.0", port=port)
 
-# start tiny web server in a background thread
-Thread(target=run_web, daemon=True).start()
-# --- end keep-alive ---
+def keep_alive():
+    Thread(target=_run_web, daemon=True).start()
+# ---------------------------------------------------------------------
 
 
-# -------- ENV --------
+# --------------------------- ENV & CONFIG -----------------------------
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
@@ -44,9 +45,11 @@ CHAN_STOCK_UPDATES = os.getenv("CHAN_STOCK_UPDATES", "อัพเดทสต�
 DB_PATH = os.getenv("DB_PATH") or os.path.join(os.getcwd(), "stock.db")
 
 if not DISCORD_TOKEN or not GUILD_ID:
-    raise SystemExit("โปรดตั้งค่า DISCORD_TOKEN และ GUILD_ID ใน .env")
+    raise SystemExit("โปรดตั้งค่า DISCORD_TOKEN และ GUILD_ID ใน .env/Environment")
+# ---------------------------------------------------------------------
 
-# -------- DB --------
+
+# ------------------------------ DATABASE -----------------------------
 conn = sqlite3.connect(DB_PATH)
 conn.row_factory = sqlite3.Row
 
@@ -69,7 +72,7 @@ def init_db():
       item_id INTEGER NOT NULL,
       received_qty INTEGER NOT NULL,
       remaining_qty INTEGER NOT NULL,
-      expiry_date INTEGER, -- epoch ms or NULL
+      expiry_date INTEGER,   -- epoch ms (nullable)
       received_by TEXT,
       received_at INTEGER,
       FOREIGN KEY(item_id) REFERENCES items(id)
@@ -95,43 +98,40 @@ def now_ms() -> int:
     return int(datetime.now(tz=timezone.utc).timestamp() * 1000)
 
 def find_item_by_name(name: str) -> Optional[sqlite3.Row]:
-    cur = conn.execute("SELECT * FROM items WHERE name = ? AND active = 1", (name.strip(),))
-    return cur.fetchone()
+    return conn.execute(
+        "SELECT * FROM items WHERE name = ? AND active = 1",
+        (name.strip(),)
+    ).fetchone()
 
 def list_items_like(prefix: str, limit: int = 25) -> List[str]:
     cur = conn.execute(
         "SELECT name FROM items WHERE active = 1 AND name LIKE ? ORDER BY name LIMIT ?",
-        (f"{prefix}%", limit),
+        (f"{prefix}%", limit)
     )
     return [r["name"] for r in cur.fetchall()]
 
 def list_all_items() -> List[sqlite3.Row]:
-    cur = conn.execute("SELECT * FROM items WHERE active = 1 ORDER BY name")
-    return cur.fetchall()
+    return conn.execute("SELECT * FROM items WHERE active = 1 ORDER BY name").fetchall()
 
 def calc_stock_summary(item_id: int) -> Tuple[int, Optional[int]]:
     total = conn.execute(
         "SELECT COALESCE(SUM(remaining_qty),0) AS total FROM stock_batches WHERE item_id = ?",
-        (item_id,),
+        (item_id,)
     ).fetchone()["total"]
     next_row = conn.execute(
-        """SELECT * FROM stock_batches
+        """SELECT expiry_date FROM stock_batches
            WHERE item_id = ? AND remaining_qty > 0
            ORDER BY COALESCE(expiry_date, 253402300799000) ASC, received_at ASC
            LIMIT 1""",
-        (item_id,),
+        (item_id,)
     ).fetchone()
-    next_exp = next_row["expiry_date"] if next_row else None
-    return total, next_exp
+    return total, (next_row["expiry_date"] if next_row else None)
 
 def parse_expiry(s: Optional[str]) -> Optional[int]:
     if not s:
         return None
-    # DD/MM/YYYY
     try:
-        dt = datetime.strptime(s.strip(), "%d/%m/%Y")
-        # set noon to avoid timezone shift
-        dt = dt.replace(hour=12, tzinfo=timezone.utc)
+        dt = datetime.strptime(s.strip(), "%d/%m/%Y").replace(hour=12, tzinfo=timezone.utc)
         return int(dt.timestamp() * 1000)
     except Exception:
         return None
@@ -145,36 +145,35 @@ def fmt_date_short(ts: Optional[int]) -> str:
     if not ts:
         return "ไม่พบข้อมูล"
     return datetime.fromtimestamp(ts/1000, tz=timezone.utc).strftime("%d/%m/%Y")
+# ---------------------------------------------------------------------
 
-# -------- Discord Bot --------
+
+# ----------------------------- DISCORD BOT ---------------------------
 intents = discord.Intents.default()
 intents.guilds = True
 intents.messages = True
+# เราไม่อ่าน message content จึงไม่ต้องเปิด privileged intent
+intents.message_content = False
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
 
-# ---------- Utilities ----------
 async def ensure_channels(guild: discord.Guild):
-    need = [
-        CHAN_ALL_ITEMS, CHAN_EDIT_LOG, CHAN_EDIT_ADD_LOG,
-        CHAN_STOCK_LIST, CHAN_RECEIVE, CHAN_ISSUE, CHAN_STOCK_UPDATES
-    ]
-    for name in need:
+    for name in [CHAN_ALL_ITEMS, CHAN_EDIT_LOG, CHAN_EDIT_ADD_LOG,
+                 CHAN_STOCK_LIST, CHAN_RECEIVE, CHAN_ISSUE, CHAN_STOCK_UPDATES]:
         if discord.utils.get(guild.text_channels, name=name) is None:
             try:
                 await guild.create_text_channel(name, reason="STOCK CTR auto-setup")
-                print(f"สร้างห้อง: {name}")
             except Exception as e:
-                print(f"⚠️ สร้างห้อง {name} ไม่ได้: {e}")
+                print(f"สร้างห้อง {name} ไม่ได้: {e}")
 
 async def purge_bot_messages(channel: discord.TextChannel):
-    """ลบเฉพาะข้อความที่ 'บอท' เคยโพสต์ในห้องนั้น (ปลอดภัยกับข้อจำกัด 14 วัน)"""
+    # ลบเฉพาะข้อความที่บอทเคยโพสต์ (จำกัดจำนวนพอสมควร)
     try:
-        async for msg in channel.history(limit=200):
-            if msg.author.id == bot.user.id:
+        async for m in channel.history(limit=200):
+            if m.author.id == bot.user.id:
                 try:
-                    await msg.delete()
+                    await m.delete()
                 except:
                     pass
     except Exception as e:
@@ -187,33 +186,30 @@ async def post_all_items_current(guild: discord.Guild):
     await purge_bot_messages(ch)
 
     items = list_all_items()
-    lines = [f"• {r['name']}" for r in items]
-    header = f"**รายการทั้งหมด ({len(lines)})**\n"
-
+    header = f"**รายการทั้งหมด ({len(items)})**\n"
     buf = header
     chunks: List[str] = []
-    for line in lines:
-        if len(buf) + len(line) + 1 > 1900:
+    for it in items:
+        line = f"• {it['name']}\n"
+        if len(buf) + len(line) > 1900:
             chunks.append(buf)
             buf = ""
-        buf += line + "\n"
+        buf += line
     if buf:
         chunks.append(buf)
-
     for c in chunks:
         await ch.send(c)
 
 def everyone_mention() -> str:
     return "@everyone"
 
-# -------- Views (Confirm Dialog) --------
 class ConfirmView(discord.ui.View):
     def __init__(self, timeout: int = 30):
         super().__init__(timeout=timeout)
         self.value: Optional[bool] = None
 
     @discord.ui.button(label="ยืนยัน", style=discord.ButtonStyle.green)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def confirm(self, interaction: discord.Interaction, _button: discord.ui.Button):
         self.value = True
         for child in self.children:
             child.disabled = True
@@ -221,7 +217,7 @@ class ConfirmView(discord.ui.View):
         self.stop()
 
     @discord.ui.button(label="ยกเลิก", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button):
         self.value = False
         for child in self.children:
             child.disabled = True
@@ -237,7 +233,6 @@ async def ask_confirm(inter: discord.Interaction, prompt: str) -> bool:
         return False
     return v.value
 
-# -------- Events --------
 @bot.event
 async def on_ready():
     init_db()
@@ -251,19 +246,20 @@ async def on_ready():
         except Exception as e:
             print("Sync error:", e)
 
-# -------- Autocomplete --------
+# --------------------------- AUTOCOMPLETE ----------------------------
 async def item_autocomplete(interaction: discord.Interaction, current: str):
     names = list_items_like(current or "")
     return [app_commands.Choice(name=n, value=n) for n in names[:25]]
+# ---------------------------------------------------------------------
 
-# -------- Commands --------
+
+# ----------------------------- COMMANDS ------------------------------
 @tree.command(name="additem", description="เพิ่มรายการสินค้า", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(name="ชื่อสินค้า")
 async def additem(inter: discord.Interaction, name: str):
     guild = inter.guild
     if not guild:
         return
-
     if not await ask_confirm(inter, f"ยืนยันที่จะบันทึกรายการ **{name}** ใช่หรือไม่?"):
         return
 
@@ -279,7 +275,6 @@ async def additem(inter: discord.Interaction, name: str):
             ("ADD", item["id"], str(inter.user), now_ms(), "เพิ่มรายการสินค้า")
         )
         conn.commit()
-
         await inter.followup.send(f"✅ เพิ่มรายการ **{name}** สำเร็จ", ephemeral=True)
         await post_all_items_current(guild)
 
@@ -300,12 +295,10 @@ async def edititem(inter: discord.Interaction, old_name: str, new_name: str):
     if not item:
         await inter.response.send_message("ไม่พบรายการเดิม", ephemeral=True)
         return
-
     if not await ask_confirm(inter, f"คุณยืนยันที่จะแก้ไขรายการ\n**{old_name} ➜ {new_name}** ใช่หรือไม่?"):
         return
 
-    conn.execute("UPDATE items SET name = ?, updated_at = ? WHERE id = ?",
-                 (new_name.strip(), now_ms(), item["id"]))
+    conn.execute("UPDATE items SET name = ?, updated_at = ? WHERE id = ?", (new_name.strip(), now_ms(), item["id"]))
     conn.execute(
         "INSERT INTO transactions (type, item_id, by_user, created_at, note) VALUES (?,?,?,?,?)",
         ("EDIT", item["id"], str(inter.user), now_ms(), f"{old_name} ➜ {new_name}")
@@ -332,7 +325,6 @@ async def deleteitem(inter: discord.Interaction, name: str):
     if not item:
         await inter.response.send_message("ไม่พบรายการ", ephemeral=True)
         return
-
     if not await ask_confirm(inter, f"ยืนยันที่จะลบรายการ **{name}** ใช่หรือไม่?"):
         return
 
@@ -371,6 +363,7 @@ async def stock(inter: discord.Interaction):
         color=0x3BA3F7,
     )
     embed.set_footer(text=f"อัปเดต: {fmt_date(now_ms())}")
+
     await inter.response.send_message(embed=embed, ephemeral=True)
 
     ch_stock = discord.utils.get(inter.guild.text_channels, name=CHAN_STOCK_LIST)
@@ -388,8 +381,8 @@ async def receive(inter: discord.Interaction, item: str, qty: app_commands.Range
     if not row:
         await inter.response.send_message("ไม่พบรายการสินค้า", ephemeral=True)
         return
-    exp_ms = parse_expiry(expiry)
 
+    exp_ms = parse_expiry(expiry)
     info = conn.execute(
         "INSERT INTO stock_batches (item_id, received_qty, remaining_qty, expiry_date, received_by, received_at) VALUES (?,?,?,?,?,?)",
         (row["id"], qty, qty, exp_ms, str(inter.user), now_ms())
@@ -417,7 +410,6 @@ async def receive(inter: discord.Interaction, item: str, qty: app_commands.Range
                               allowed_mentions=discord.AllowedMentions(everyone=True),
                               embed=embed)
 
-    # ส่งอัปเดตคงเหลือไปห้องอัพเดทสต็อคเท่านั้น
     ch_updates = discord.utils.get(guild.text_channels, name=CHAN_STOCK_UPDATES)
     if ch_updates:
         upd = discord.Embed(title="อัปเดตสต็อค",
@@ -487,20 +479,17 @@ async def issue(inter: discord.Interaction, item: str, qty: app_commands.Range[i
                             allowed_mentions=discord.AllowedMentions(everyone=True),
                             embed=embed)
 
-    # อัปเดตคงเหลือไปห้องอัพเดทสต็อค
     ch_updates = discord.utils.get(guild.text_channels, name=CHAN_STOCK_UPDATES)
     if ch_updates:
         upd = discord.Embed(title="อัปเดตสต็อค",
                             description=f"**{row['name']}** คงเหลือ: **{total}**",
                             color=0x3BA3F7)
         await ch_updates.send(embed=upd)
+# ---------------------------------------------------------------------
 
-    await inter.response.send_message("✅ เบิกออกเรียบร้อย", embed=embed, ephemeral=True)
 
-# ---------- Export CSV/PDF ----------
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-
+# ------------------------------- EXPORTS ------------------------------
+# CSV/PDF: ใช้เฉพาะ CSV ที่ฝั่งเซิร์ฟเวอร์ฟรี (ลด dependency)
 def export_rows():
     cur = conn.execute(
         """SELECT i.name,
@@ -514,45 +503,21 @@ def export_rows():
     )
     return cur.fetchall()
 
-@tree.command(name="export", description="ส่งออกข้อมูลสต็อค (CSV/PDF)", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(format="csv หรือ pdf")
-@app_commands.choices(format=[
-    app_commands.Choice(name="csv", value="csv"),
-    app_commands.Choice(name="pdf", value="pdf"),
-])
-async def export_cmd(inter: discord.Interaction, format: app_commands.Choice[str]):
+@tree.command(name="export", description="ส่งออกข้อมูลสต็อคเป็น CSV", guild=discord.Object(id=GUILD_ID))
+async def export_cmd(inter: discord.Interaction):
     rows = export_rows()
-    if format.value == "csv":
-        path = os.path.join(os.getcwd(), f"export_stock_{int(datetime.now().timestamp())}.csv")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("name,total,next_expiry\n")
-            for r in rows:
-                exp = "" if (r["next_expiry"] is None or r["next_expiry"] >= 253402300799000) else \
-                    datetime.utcfromtimestamp(r["next_expiry"]/1000).strftime("%Y-%m-%d")
-                f.write(f"{r['name']},{r['total']},{exp}\n")
-        await inter.response.send_message(file=discord.File(path), ephemeral=True)
-    else:
-        path = os.path.join(os.getcwd(), f"export_stock_{int(datetime.now().timestamp())}.pdf")
-        c = canvas.Canvas(path, pagesize=A4)
-        width, height = A4
-        y = height - 40
-        c.setFont("Helvetica-Bold", 16)
-        c.drawCentredString(width/2, y, "STOCK CTR — รายการสต็อค")
-        y -= 30
-        c.setFont("Helvetica", 11)
+    path = os.path.join(os.getcwd(), f"export_stock_{int(datetime.now().timestamp())}.csv")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("name,total,next_expiry\n")
         for r in rows:
-            exp = "ไม่พบข้อมูล"
-            if r["next_expiry"] is not None and r["next_expiry"] < 253402300799000:
-                exp = datetime.utcfromtimestamp(r["next_expiry"]/1000).strftime("%d/%m/%Y")
-            line = f"{r['name']} — คงเหลือ: {r['total']} — หมดอายุถัดไป: {exp}"
-            if y < 40:
-                c.showPage()
-                y = height - 40
-            c.drawString(40, y, line)
-            y -= 18
-        c.save()
-        await inter.response.send_message(file=discord.File(path), ephemeral=True)
+            exp = "" if (r["next_expiry"] is None or r["next_expiry"] >= 253402300799000) else \
+                datetime.utcfromtimestamp(r["next_expiry"]/1000).strftime("%Y-%m-%d")
+            f.write(f"{r['name']},{r['total']},{exp}\n")
+    await inter.response.send_message(file=discord.File(path), ephemeral=True)
+# ---------------------------------------------------------------------
 
-# -------- Run --------
+
+# -------------------------------- RUN --------------------------------
 if __name__ == "__main__":
+    keep_alive()           # สำคัญมากสำหรับ Render (free)
     bot.run(DISCORD_TOKEN)
