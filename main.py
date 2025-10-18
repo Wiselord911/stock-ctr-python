@@ -8,6 +8,25 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+# --- Keep-alive web server for Render (FREE plan) ---
+from flask import Flask
+from threading import Thread
+
+app = Flask(__name__)
+
+@app.get("/")
+def root():
+    return "STOCK CTR Python bot is running!"
+
+def run_web():
+    import os
+    port = int(os.getenv("PORT", "8080"))  # Render sets $PORT
+    app.run(host="0.0.0.0", port=port)
+
+# start tiny web server in a background thread
+Thread(target=run_web, daemon=True).start()
+# --- end keep-alive ---
+
 
 # -------- ENV --------
 load_dotenv()
