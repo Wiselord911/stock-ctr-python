@@ -2,6 +2,7 @@ services:
   - type: worker
     name: stock-ctr-python
     env: python
+    plan: free                      # ✅ ใช้แผนฟรี
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
     autoDeploy: true
@@ -11,8 +12,5 @@ services:
         sync: false
       - key: GUILD_ID
         sync: false
-
-    disk:
-      name: stock-data
-      mountPath: /var/data
-      sizeGB: 1
+      - key: DB_PATH
+        value: /tmp/stock.db         # ✅ ฐานข้อมูลชั่วคราว (ฟรี ไม่มีค่าใช้จ่าย)
