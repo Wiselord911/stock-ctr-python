@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: stock-ctr-python
     env: python
     plan: free                      # ✅ ใช้แผนฟรี
@@ -13,4 +13,4 @@ services:
       - key: GUILD_ID
         sync: false
       - key: DB_PATH
-        value: /tmp/stock.db         # ✅ ฐานข้อมูลชั่วคราว (ฟรี ไม่มีค่าใช้จ่าย)
+        value: /tmp/stock.db         # ✅ ฐานข้อมูลชั่วคราว (ฟรี)
